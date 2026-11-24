@@ -2,17 +2,8 @@ local p = ARGV[1]
 local worker = ARGV[2]
 local n = tonumber(ARGV[3])
 local ttl = tonumber(ARGV[4])
-local now = tonumber(ARGV[5])
-local cost = tonumber(ARGV[6])
-
-if not now then
-  local t = redis.call("TIME")
-  now = tonumber(t[1]) + tonumber(t[2]) / 1e6
-end
-
-local function num(v)
-  return string.format("%.17g", v)
-end
+local now = clock(ARGV[5])
+local default_cost = tonumber(ARGV[6])
 
 local claimed = {}
 local guard = n * 2 + 10
@@ -31,6 +22,7 @@ while #claimed < n and guard > 0 do
   if not job then
     redis.call("ZREM", p .. "ready", tenant)
   else
+    local cost = tonumber(redis.call("HGET", p .. "est", tenant) or default_cost)
     local attempt = redis.call("HINCRBY", p .. "attempt", job, 1)
     redis.call("HSET", p .. "lease:" .. job,
       "attempt", attempt,
@@ -41,8 +33,11 @@ while #claimed < n and guard > 0 do
       "estimate_left", num(cost))
     redis.call("ZADD", p .. "leases", num(now + ttl), job)
 
-    local weight = tonumber(redis.call("HGET", p .. "weight", tenant) or "1")
-    local next_score = score + cost / weight
+    if score > tonumber(redis.call("GET", p .. "gvt") or "0") then
+      redis.call("SET", p .. "gvt", num(score))
+    end
+
+    local next_score = score + cost / weight_of(p, tenant)
     redis.call("HSET", p .. "vtime", tenant, num(next_score))
     if redis.call("LLEN", queue) == 0 then
       redis.call("ZREM", p .. "ready", tenant)
