@@ -3,6 +3,7 @@ import queue
 import random
 import threading
 
+from django.conf import settings
 from django.db import close_old_connections, connections
 from redis.exceptions import RedisError
 
@@ -16,14 +17,20 @@ _DONE = object()
 
 
 class Worker:
-    def __init__(self, slots, worker_id, fair_queue=None, idle_sleep=(0.05, 0.2)):
+    def __init__(
+        self, slots, worker_id, fair_queue=None, idle_sleep=(0.05, 0.2), heartbeat_every=None
+    ):
         self.slots = slots
         self.worker_id = worker_id
         self.fair_queue = fair_queue or FairQueue.default()
         self.idle_sleep = idle_sleep
+        self.heartbeat_every = heartbeat_every or settings.HEARTBEAT_SECONDS
         self.running = 0
         self.peak_running = 0
+        self.lost = set()
+        self._held = {}
         self._stopping = threading.Event()
+        self._finished = threading.Event()
         self._slot_freed = threading.Condition()
         self._work = queue.SimpleQueue()
 
@@ -38,7 +45,8 @@ class Worker:
             threading.Thread(target=self._slot_loop, name=f"slot-{i}", daemon=True)
             for i in range(self.slots)
         ]
-        for thread in threads:
+        heartbeat = threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True)
+        for thread in [*threads, heartbeat]:
             thread.start()
         try:
             self._claim_loop()
@@ -47,6 +55,8 @@ class Worker:
                 self._work.put(_DONE)
             for thread in threads:
                 thread.join()
+            self._finished.set()
+            heartbeat.join()
             connections.close_all()
             logger.info("worker %s stopped", self.worker_id)
 
@@ -60,7 +70,7 @@ class Worker:
                 self._stopping.wait(random.uniform(*self.idle_sleep))
                 continue
             for claim in claims:
-                self._take_slot()
+                self._take_slot(claim)
                 self._work.put(claim)
 
     def _slot_loop(self):
@@ -69,9 +79,25 @@ class Worker:
                 try:
                     self._execute(claim)
                 finally:
-                    self._free_slot()
+                    self._free_slot(claim)
         finally:
             connections.close_all()
+
+    def _heartbeat_loop(self):
+        while not self._finished.wait(self.heartbeat_every):
+            with self._slot_freed:
+                held = list(self._held.items())
+            if not held:
+                continue
+            try:
+                lost = self.fair_queue.heartbeat(self.worker_id, held)
+            except RedisError:
+                logger.exception("heartbeat failed")
+                continue
+            if lost:
+                logger.warning("leases lost for %s", ", ".join(lost))
+                with self._slot_freed:
+                    self.lost.update(lost)
 
     def _wait_for_free_slots(self):
         with self._slot_freed:
@@ -87,14 +113,16 @@ class Worker:
             self._stopping.wait(1)
             return []
 
-    def _take_slot(self):
+    def _take_slot(self, claim):
         with self._slot_freed:
             self.running += 1
             self.peak_running = max(self.peak_running, self.running)
+            self._held[claim.job_id] = claim.attempt
 
-    def _free_slot(self):
+    def _free_slot(self, claim):
         with self._slot_freed:
             self.running -= 1
+            self._held.pop(claim.job_id, None)
             self._slot_freed.notify_all()
 
     def _execute(self, claim):

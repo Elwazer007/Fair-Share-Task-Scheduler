@@ -111,3 +111,52 @@ def test_release_without_lease_is_stale(fq):
 def test_release_rejects_unknown_outcome(fq):
     with pytest.raises(ValueError):
         fq.release("j1", 1, "maybe")
+
+
+def test_heartbeat_extends_lease_for_current_owner(fq, redis_client):
+    fq.enqueue("a", ["j1"])
+    [claim] = fq.claim("w1", 1, lease_ttl=30, now=NOW)
+
+    lost = fq.heartbeat("w1", [("j1", claim.attempt)], lease_ttl=30, now=NOW + 10)
+
+    assert lost == []
+    assert redis_client.zscore(fq.keys.leases, "j1") == NOW + 40
+
+
+def test_heartbeat_reports_leases_it_no_longer_holds(fq, redis_client):
+    fq.enqueue("a", ["j1"])
+    [claim] = fq.claim("w1", 1, lease_ttl=30, now=NOW)
+
+    lost = fq.heartbeat(
+        "w1", [("j1", claim.attempt + 1), ("missing", 1)], lease_ttl=30, now=NOW + 10
+    )
+    assert sorted(lost) == ["j1", "missing"]
+    assert fq.heartbeat("w2", [("j1", claim.attempt)], now=NOW + 10) == ["j1"]
+    assert redis_client.zscore(fq.keys.leases, "j1") == NOW + 30
+
+
+def test_release_charges_actual_runtime(fq, redis_client):
+    fq.enqueue("a", ["j1"])
+    [claim] = fq.claim("w1", 1, now=NOW, cost=1.0)
+
+    fq.release("j1", claim.attempt, "done", now=NOW + 7)
+
+    assert float(redis_client.hget(fq.keys.vtime, "a")) == pytest.approx(7.0)
+    assert float(redis_client.hget(fq.keys.usage, "a")) == pytest.approx(7.0)
+    assert float(redis_client.hget(fq.keys.est, "a")) == pytest.approx(0.8 * 1.0 + 0.2 * 7)
+
+
+def test_release_refunds_an_unused_estimate(fq, redis_client):
+    fq.enqueue("a", ["j1"])
+    [claim] = fq.claim("w1", 1, now=NOW, cost=1.0)
+
+    fq.release("j1", claim.attempt, "done", now=NOW + 0.25)
+
+    assert float(redis_client.hget(fq.keys.vtime, "a")) == pytest.approx(0.25)
+    assert float(redis_client.hget(fq.keys.usage, "a")) == pytest.approx(0.25)
+
+
+def test_enqueue_handles_more_ids_than_fit_in_one_push(fq, redis_client):
+    ids = [f"j{i}" for i in range(20_000)]
+    assert fq.enqueue("a", ids) == 20_000
+    assert redis_client.llen(fq.keys.queue("a")) == 20_000

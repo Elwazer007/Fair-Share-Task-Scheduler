@@ -16,3 +16,8 @@ class JobNotFound(SchedulerError):
 class StoreUnavailable(SchedulerError):
     code = "store_unavailable"
     status = 503
+
+
+class TooManyQueuedJobs(SchedulerError):
+    code = "too_many_queued_jobs"
+    status = 429
