@@ -88,6 +88,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [],
     "DEFAULT_PERMISSION_CLASSES": [],
     "UNAUTHENTICATED_USER": None,
+    "EXCEPTION_HANDLER": "scheduler.api.errors.handle_exception",
 }
 
 LANGUAGE_CODE = "en-us"
