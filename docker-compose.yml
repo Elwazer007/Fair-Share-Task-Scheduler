@@ -1,0 +1,98 @@
+x-app: &app
+  build:
+    context: .
+    target: runtime
+  environment: &app-env
+    DATABASE_URL: postgres://scheduler:scheduler@postgres:5432/scheduler
+    REDIS_URL: redis://redis:6379/0
+    LEASE_TTL_SECONDS: "30"
+    HEARTBEAT_SECONDS: "10"
+    MAX_ATTEMPTS: "3"
+    DEFAULT_MAX_QUEUED: "200000"
+    DEFAULT_COST_SECONDS: "1.0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scheduler
+      POSTGRES_PASSWORD: scheduler
+      POSTGRES_DB: scheduler
+    command: ["postgres", "-c", "max_connections=300"]
+    ports:
+      - "${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler -d scheduler"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    <<: *app
+    ports:
+      - "${API_HOST_PORT:-18000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/admin/login/')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *app
+    command: ["python", "manage.py", "run_worker", "--slots", "8"]
+    stop_grace_period: 330s
+
+  maintenance:
+    <<: *app
+    command: ["python", "manage.py", "run_maintenance"]
+
+  test:
+    <<: *app
+    build:
+      context: .
+      target: dev
+    environment:
+      <<: *app-env
+      TEST_REDIS_URL: redis://redis:6379/15
+    command: ["pytest"]
+    restart: "no"
+    profiles: ["tools"]
+
+  loadtest:
+    <<: *app
+    build:
+      context: .
+      target: dev
+    environment:
+      <<: *app-env
+      API_URL: http://api:8000
+    volumes:
+      - ./results:/app/results
+    command: ["python", "-m", "loadtest.flood", "--help"]
+    restart: "no"
+    profiles: ["tools"]
+
+volumes:
+  pgdata:
+  redisdata:
