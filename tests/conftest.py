@@ -48,3 +48,10 @@ class FixedClock:
 @pytest.fixture
 def clock():
     return FixedClock()
+
+
+@pytest.fixture
+def fq(redis_client):
+    from scheduler.fairqueue.scripts import FairQueue
+
+    return FairQueue(redis_client)

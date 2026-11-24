@@ -75,6 +75,8 @@ services:
     environment:
       <<: *app-env
       TEST_REDIS_URL: redis://redis:6379/15
+    volumes:
+      - .:/app
     command: ["pytest"]
     restart: "no"
     profiles: ["tools"]
