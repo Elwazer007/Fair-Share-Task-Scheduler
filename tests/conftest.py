@@ -55,3 +55,10 @@ def fq(redis_client):
     from scheduler.fairqueue.scripts import FairQueue
 
     return FairQueue(redis_client)
+
+
+@pytest.fixture
+def api_client():
+    from rest_framework.test import APIClient
+
+    return APIClient()
