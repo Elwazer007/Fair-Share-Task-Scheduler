@@ -123,11 +123,18 @@ class Worker:
         with self._slot_freed:
             self.running -= 1
             self._held.pop(claim.job_id, None)
+            self.lost.discard(claim.job_id)
             self._slot_freed.notify_all()
+
+    def _is_lost(self, claim):
+        with self._slot_freed:
+            return claim.job_id in self.lost
 
     def _execute(self, claim):
         try:
             close_old_connections()
+            if self._is_lost(claim):
+                return
             payload = lifecycle.start(claim.job_id, claim.attempt, self.worker_id)
             if payload is None:
                 logger.info("job %s attempt %d is no longer startable", claim.job_id, claim.attempt)
@@ -135,10 +142,27 @@ class Worker:
                 return
             try:
                 run_payload(payload)
-            except Exception:
-                logger.exception("job %s attempt %d raised", claim.job_id, claim.attempt)
+            except Exception as exc:
+                logger.info("job %s attempt %d raised %r", claim.job_id, claim.attempt, exc)
+                self._finish_failed(claim, f"{type(exc).__name__}: {exc}")
+                return
+            if self._is_lost(claim):
+                logger.warning(
+                    "job %s attempt %d finished after its lease was lost",
+                    claim.job_id,
+                    claim.attempt,
+                )
                 return
             if lifecycle.succeed(claim.job_id, claim.attempt):
                 self.fair_queue.release(claim.job_id, claim.attempt, "done")
         except Exception:
             logger.exception("job %s attempt %d not completed", claim.job_id, claim.attempt)
+
+    def _finish_failed(self, claim, error):
+        if self._is_lost(claim):
+            return
+        decision = lifecycle.fail(claim.job_id, claim.attempt, error)
+        if decision is not None:
+            self.fair_queue.release(
+                claim.job_id, claim.attempt, decision.outcome, run_after=decision.run_after
+            )
