@@ -8,7 +8,8 @@ from django.conf import settings
 from scheduler.fairqueue.keys import PREFIX, Keys
 
 LUA_DIR = Path(__file__).parent / "lua"
-SCRIPT_NAMES = ("enqueue", "claim", "heartbeat", "release")
+SCRIPT_NAMES = ("enqueue", "claim", "heartbeat", "release", "expired", "promote", "restore")
+SCAN_LIMIT = 500
 
 
 class QueueFull(Exception):
@@ -94,8 +95,35 @@ class FairQueue:
             _num(self._default_cost(cost)),
         )
 
+    def expired(self, now=None, limit=SCAN_LIMIT):
+        rows = self._run("expired", _num(now), int(limit))
+        return [(job_id, int(attempt)) for job_id, attempt in rows]
+
+    def promote(self, now=None, limit=SCAN_LIMIT):
+        return int(self._run("promote", _num(now), int(limit)))
+
+    def restore(self, tenant, jobs, now=None):
+        if not jobs:
+            return 0
+        args = [
+            str(value)
+            for job_id, attempts, run_after in jobs
+            for value in (job_id, int(attempts), _num(run_after))
+        ]
+        return int(self._run("restore", tenant, _num(now), *args))
+
     def set_weight(self, tenant, weight):
         self.client.hset(self.keys.weight, tenant, int(weight))
+
+    def set_weights(self, weights):
+        if weights:
+            self.client.hset(self.keys.weight, mapping={t: int(w) for t, w in weights.items()})
+
+    def has_epoch(self):
+        return bool(self.client.exists(self.keys.epoch))
+
+    def mark_epoch(self, value):
+        self.client.set(self.keys.epoch, value)
 
     @staticmethod
     def _default_cost(cost):

@@ -21,6 +21,10 @@ while #claimed < n and guard > 0 do
 
   if not job then
     redis.call("ZREM", p .. "ready", tenant)
+  elseif redis.call("EXISTS", p .. "lease:" .. job) == 1 then
+    if redis.call("LLEN", queue) == 0 then
+      redis.call("ZREM", p .. "ready", tenant)
+    end
   else
     local cost = tonumber(redis.call("HGET", p .. "est", tenant) or default_cost)
     local attempt = redis.call("HINCRBY", p .. "attempt", job, 1)
