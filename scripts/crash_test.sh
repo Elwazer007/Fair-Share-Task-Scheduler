@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-API="http://localhost:${API_PORT:-18000}/api"
+API="http://localhost:${API_HOST_PORT:-18000}/api"
 TENANT=crash-test
 TIMEOUT=${TIMEOUT:-120}
 
